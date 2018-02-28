@@ -1,0 +1,6 @@
+I thank the content creators who provided with the resources to make this exercise possible. Following are the references for this repository:
+
+1. inotify C++ test script:
+	http://opensourceforu.com/2011/04/getting-started-with-inotify/
+
+
