@@ -3,4 +3,7 @@ I thank the content creators who provided with the resources to make this exerci
 1. inotify C++ test script:
 	http://opensourceforu.com/2011/04/getting-started-with-inotify/
 
+2. test client / server using sockets:
+	https://www.geeksforgeeks.org/socket-programming-cc/
+
 
