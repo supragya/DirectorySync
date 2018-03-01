@@ -1,11 +1,16 @@
-#include <stdio.h>
+#include <iostream>
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
+#include <string.h>
+#include <fstream>
 #include <sys/types.h>
 #include <sys/inotify.h>
+#include <netinet/in.h>
 #include <limits.h>
+#include <sys/stat.h>
 #include <mutex>
+#include <arpa/inet.h>
 #include <thread>
 
 #define MAX_EVENTS 1024 /*Max. number of events to process at one go*/
@@ -31,30 +36,29 @@ enum filechangetype{
 };
 
 enum filetype{
-    FILE,
+    FILE_,
     DIRECTORY
 };
 
 struct message{
-    messagetype mtype,
-    filechangetype fctype,
-    filetype ftype,
-    char filename[1000],
-    unsigned long long filesize
+    long long int filesize;
+    char filename[1000];
+    enum messagetype mtype;
+    enum filechangetype fctype;
+    enum filetype ftype;
 };
 
-void reader(int portno){
+void reader(int portno, char *dirname){
     int server_fd, new_socket, valread;
     struct sockaddr_in address;
     int opt = 1;
     int addrlen = sizeof(address);
-    char buffer[1024] = {0};
-    char *hello = "Hello from server";
-
+    char workCMD[10000];
+    std::cout<<"-- Began thread [RECV] --\n";
     // Creating socket file descriptor
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0)
     {
-        perror("socket failed");
+        std::cout<<"[RECV] Socket Failed\n";
         exit(EXIT_FAILURE);
     }
 
@@ -62,7 +66,7 @@ void reader(int portno){
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT,
                                                   &opt, sizeof(opt)))
     {
-        perror("setsockopt");
+        std::cout<<"[RECV] Socket Failed (setsockopt)\n";
         exit(EXIT_FAILURE);
     }
     address.sin_family = AF_INET;
@@ -73,49 +77,56 @@ void reader(int portno){
     if (bind(server_fd, (struct sockaddr *)&address,
                                  sizeof(address))<0)
     {
-        perror("bind failed");
+        std::cout<<"[RECV] Socket Failed to bind\n";
         exit(EXIT_FAILURE);
     }
+
     if (listen(server_fd, 3) < 0)
     {
-        perror("listen");
+        std::cout<<"[RECV] Error Listen\n";
         exit(EXIT_FAILURE);
     }
+
+    std::cout<<"[RECV] Ready to listen. Ping the other droid"<<std::endl;
+
     if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen))<0)
     {
-        perror("accept");
+        std::cout<<"[RECV] Error accept\n";
         exit(EXIT_FAILURE);
     }
 
-    message *incoming = malloc(sizeof(message));
-    message *outgoing = malloc(sizeof(message));
+    std::cout<<"[RECV] Accepted communication at " <<portno<< std::endl;
+    message *incoming = (message*)malloc(sizeof(message));
+    message *outgoing = (message*)malloc(sizeof(message));
     char *filedata;
-
     while(1){
-        valread = read( new_socket , incoming, sizeof(message));
+        valread = recv(new_socket , (void*)incoming, sizeof(message), 0);
         if(incoming->mtype == TRY_SEND){
-            std::cout<<"[RECV] Recieved try send message from other droid... "<<std::endl;
-            if(incoming->filechangetype == CREATE || incoming->filechangetype == MODIFY){
-                if(incoming->filetype == DIRECTORY){
-                    int dir_err = mkdir(incoming->filename, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
-                    if (-1 == dir_err){
-                        std::cout<<"[RECV] Error creating directory "<<incoming->filename<<std::endl;
-                        exit(1);
-                    }
-                    break;
+            std::cout<<"[RECV] Recieved try send message from other droid... "<<valread<<" of "<<sizeof(message)<<std::endl;
+            if(incoming->fctype == CREATE || incoming->fctype == MODIFY){
+                std::cout<<"[RECV] FCtype = CREATE or MODIFY"<<std::endl;
+                if(incoming->ftype == DIRECTORY){
+                    std::cout<<"[RECV] FileType = DIRECTORY named "<<incoming->filename<<std::endl;
+                    strcpy(workCMD, "mkdir -p ");
+                    strcat(workCMD, dirname);
+                    strcat(workCMD, "/");
+                    strcat(workCMD, incoming->filename);
+                    std::cout<<"[RECV] workCMD: "<<workCMD<<std::endl;
+                    system(workCMD);
+                    std::cout<<"[RECV] Created directory "<<incoming->filename<<std::endl;
                 }
                 else{
-                    filedata = malloc(sizeof(char)*incoming->filesize);
+                    std::cout<<"[RECV] FileType = FILE  named "<<incoming->filename<<std::endl;
+                    filedata = (char*)malloc(sizeof(char)*incoming->filesize);
                     if(!filedata){
                         std::cout<<"[RECV] Error allocating space for transfer of "<<incoming->filename<<std::endl;
                         exit(1);
                     }
                     outgoing->mtype = READY_RECIEVE;
-                    send(new_socket, outgoing , strlen(outgoing) , 0);
-                    recv(new_socket, filedata, sizeof(filedata));
+                    read(new_socket, filedata, sizeof(filedata));
 
                     //Write the file
-                    ofstream filedump(incoming->filename, ios::binary);
+                    std::ofstream filedump(incoming->filename, std::ios::binary);
                     if(!filedump){
                         std::cout<<"[RECV] Error opening file "<<incoming->filename<<std::endl;
                         exit(1);
@@ -125,30 +136,33 @@ void reader(int portno){
                     free(filedata);
                 }
             }
-            else if(incoming->filechangetype == DELETE){
-                
+            else if(incoming->fctype == DELETE){
+                // TODO
             }
         }
     }
-    return 0;
 }
-void filewatcher(char *dirname);
+void filewatcher(char *dirname, int portno, char* ipaddr);
 
-int main( int argc, char **argv )
+int main( int argc, char **argv)
 {
-
+    std::thread listener(reader, atoi(argv[4]), argv[1]);
+    char foldername[] = "sync_folder_bot1";
+    std::thread watcher(filewatcher, argv[1], atoi(argv[3]), argv[2]);
+    listener.join();
     return 0;
 }
 
-void filewatcher(char *dirname){
+void filewatcher(char *dirname, int portno, char* ipaddr){
+
     int length, i = 0, wd;
     int fd;
-    char buffer[BUF_LEN];
-
+    char *buffer[BUF_LEN];
+    std::cout<<"-- Began thread [FILEWATCHER] --\n";
     /* Initialize Inotify*/
     fd = inotify_init();
     if ( fd < 0 ) {
-        std::cout<<"Could not initialise inotify, quitting\n";
+        std::cout<<"[FILEWATCHER] Could not initialise inotify, quitting\n";
         exit(1);
     }
 
@@ -156,41 +170,95 @@ void filewatcher(char *dirname){
     wd = inotify_add_watch(fd, dirname, IN_CREATE | IN_MODIFY | IN_DELETE);
 
     if (wd == -1){
-        std::cout<<"Could not add watch to "<<dirname<<", quitting\n";
+        std::cout<<"[FILEWATCHER] Could not add watch to "<<dirname<<", quitting\n";
         exit(1);
     }
     else
-        std::cout<<"[filewatcher] Started watching "<<dirname<<"\n";
+        std::cout<<"[FILEWATCHER] Started watching "<<dirname<<"\n";
+
+    struct sockaddr_in address;
+    int sock = 0, valread;
+    struct sockaddr_in serv_addr;
+
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+    {
+        printf("[FILEWATCHER] Socket creation error \n");
+        exit(1);
+    }
+
+    memset(&serv_addr, '0', sizeof(serv_addr));
+
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(portno);
+
+    // Convert IPv4 and IPv6 addresses from text to binary form
+    if(inet_pton(AF_INET, ipaddr, &serv_addr.sin_addr)<=0)
+    {
+        printf("[FILEWATCHER] Invalid address/ Address not supported \n");
+        exit(1);
+    }
+    std::cout<<"[FILEWATCHER] Other bot ready to accept communication? [y/n]?";
+    char ch;
+    std::cin>>ch;
+    if(ch !='y' && ch !='Y'){
+        std::cout<<"[FILEWATCHER] You did not want to communicate. Bye"<<std::endl;
+        exit(1);
+    }
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+    {
+        printf("[FILEWATCHER] Connection Failed \n");
+        exit(1);
+    }
+
+    std::cout<<"[FILEWATCHER] Successfully setup connection with other droid\n";
+    message *incoming = (message*)malloc(sizeof(message));
+    message *outgoing = (message*)malloc(sizeof(message));
 
     /* do it forever*/
     while(1){
         i = 0;
         length = read( fd, buffer, BUF_LEN );
         if ( length < 0 )
-            perror( "read" );
+            std::cout<<"[FILEWATCHER] Read Error \n";
 
         while ( i < length ) {
             struct inotify_event *event = ( struct inotify_event * ) &buffer[ i ];
             if (event->len ) {
                 if (event->mask & IN_CREATE) {
-                    if (event->mask & IN_ISDIR)
-                        printf( "The directory %s was Created.\n", event->name );
-                    else
-                        printf( "The file %s was Created with WD %d\n", event->name, event->wd );
+                    if (event->mask & IN_ISDIR){
+                        std::cout<<"[FILEWATCHER]\tCreated\tDIR\t"<<event->name<<std::endl;
+                        outgoing->mtype = TRY_SEND;
+                        outgoing->fctype = CREATE;
+                        outgoing->ftype = DIRECTORY;
+                        strcpy(outgoing->filename, event->name);
+
+                        std::cout<<"[FILEWATCHER]-- Sending request to create directory "<<outgoing->filename<<std::endl;
+                        int sent = send(sock, outgoing, sizeof(message), 0 );
+                        std::cout<<"[FILEWATCHER]-- Request sent, bytes = "<<sent<<" of "<<sizeof(message)<<std::endl;
+
                     }
+                    else{
+                        std::cout<<"[FILEWATCHER]\tCreated\tFILE\t"<<event->name<<std::endl;
+
+                    }
+                }
 
                 if ( event->mask & IN_MODIFY) {
-                    if (event->mask & IN_ISDIR)
-                        printf( "The directory %s was modified.\n", event->name );
-                    else
-                        printf( "The file %s was modified with WD %d\n", event->name, event->wd );
+                    if (event->mask & IN_ISDIR){
+                        std::cout<<"[FILEWATCHER]\tModified\tDIR\t"<<event->name<<std::endl;
+                    }
+                    else{
+                        std::cout<<"[FILEWATCHER]\tModified\tFILE\t"<<event->name<<std::endl;
+                    }
                 }
 
                 if ( event->mask & IN_DELETE) {
-                    if (event->mask & IN_ISDIR)
-                        printf( "The directory %s was deleted.\n", event->name );
-                    else
-                        printf( "The file %s was deleted with WD %d\n", event->name, event->wd );
+                    if (event->mask & IN_ISDIR){
+                        std::cout<<"[FILEWATCHER]\tDeleted\tDIR\t"<<event->name<<std::endl;
+                    }
+                    else{
+                        std::cout<<"[FILEWATCHER]\tDeleted\tFILE\t"<<event->name<<std::endl;
+                    }
                 }
 
                 i += EVENT_SIZE + event->len;
@@ -202,5 +270,4 @@ void filewatcher(char *dirname){
     inotify_rm_watch( fd, wd );
     close( fd );
 
-    return 0;
 }
