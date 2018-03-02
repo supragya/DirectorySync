@@ -116,28 +116,55 @@ void reader(int portno, char *dirname){
                     std::cout<<"[RECV] Created directory "<<incoming->filename<<std::endl;
                 }
                 else{
-                    std::cout<<"[RECV] FileType = FILE  named "<<incoming->filename<<std::endl;
+                    std::cout<<"[RECV] FileType = FILE  named "<<incoming->filename<<" sized "<<incoming->filesize<<std::endl;
                     filedata = (char*)malloc(sizeof(char)*incoming->filesize);
                     if(!filedata){
                         std::cout<<"[RECV] Error allocating space for transfer of "<<incoming->filename<<std::endl;
                         exit(1);
                     }
                     outgoing->mtype = READY_RECIEVE;
-                    read(new_socket, filedata, sizeof(filedata));
-
-                    //Write the file
-                    std::ofstream filedump(incoming->filename, std::ios::binary);
-                    if(!filedump){
-                        std::cout<<"[RECV] Error opening file "<<incoming->filename<<std::endl;
-                        exit(1);
+                    strcpy(workCMD, dirname);
+                    strcat(workCMD, "/");
+                    strcat(workCMD, incoming->filename);
+                    std::ofstream filedump(workCMD, std::ios::binary);
+                    if(incoming->fctype == MODIFY){
+                        std::cout<<"[RECV] Begin reading data of file from other droid"<<std::endl;
+                        read(new_socket, filedata, sizeof(filedata));
+                        std::cout<<"[RECV] Done reading data of file from other droid"<<std::endl;
+                        std::cout<<"[RECV] Begin writing data to file "<<incoming->filename<<std::endl;
+                        if(!filedump){
+                            std::cout<<"[RECV] Error opening file "<<incoming->filename<<std::endl;
+                            exit(1);
+                        }
+                        filedump<<filedata;
+                        std::cout<<"[RECV] Done writing data to file "<<incoming->filename<<std::endl;
                     }
-                    filedump<<filedata;
                     filedump.close();
                     free(filedata);
                 }
             }
             else if(incoming->fctype == DELETE){
-                // TODO
+                std::cout<<"[RECV] FCtype = DELETE"<<std::endl;
+                if(incoming->ftype == DIRECTORY){
+                    std::cout<<"[RECV] FileType = DIRECTORY named "<<incoming->filename<<std::endl;
+                    strcpy(workCMD, "rm -r ");
+                    strcat(workCMD, dirname);
+                    strcat(workCMD, "/");
+                    strcat(workCMD, incoming->filename);
+                    std::cout<<"[RECV] workCMD: "<<workCMD<<std::endl;
+                    system(workCMD);
+                    std::cout<<"[RECV] Deleted directory "<<incoming->filename<<std::endl;
+                }
+                else{
+                    std::cout<<"[RECV] FileType = FILE  named "<<incoming->filename<<" sized "<<incoming->filesize<<std::endl;
+                    strcpy(workCMD, "rm ");
+                    strcat(workCMD, dirname);
+                    strcat(workCMD, "/");
+                    strcat(workCMD, incoming->filename);
+                    std::cout<<"[RECV] workCMD: "<<workCMD<<std::endl;
+                    system(workCMD);
+                    std::cout<<"[RECV] Deleted file "<<incoming->filename<<std::endl;
+                }
             }
         }
     }
@@ -147,7 +174,6 @@ void filewatcher(char *dirname, int portno, char* ipaddr);
 int main( int argc, char **argv)
 {
     std::thread listener(reader, atoi(argv[4]), argv[1]);
-    char foldername[] = "sync_folder_bot1";
     std::thread watcher(filewatcher, argv[1], atoi(argv[3]), argv[2]);
     listener.join();
     return 0;
@@ -157,7 +183,7 @@ void filewatcher(char *dirname, int portno, char* ipaddr){
 
     int length, i = 0, wd;
     int fd;
-    char *buffer[BUF_LEN];
+    char *buffer[BUF_LEN], workCMD[10000];
     std::cout<<"-- Began thread [FILEWATCHER] --\n";
     /* Initialize Inotify*/
     fd = inotify_init();
@@ -211,7 +237,6 @@ void filewatcher(char *dirname, int portno, char* ipaddr){
     }
 
     std::cout<<"[FILEWATCHER] Successfully setup connection with other droid\n";
-    message *incoming = (message*)malloc(sizeof(message));
     message *outgoing = (message*)malloc(sizeof(message));
 
     /* do it forever*/
@@ -222,7 +247,7 @@ void filewatcher(char *dirname, int portno, char* ipaddr){
             std::cout<<"[FILEWATCHER] Read Error \n";
 
         while ( i < length ) {
-            struct inotify_event *event = ( struct inotify_event * ) &buffer[ i ];
+            struct inotify_event *event = (struct inotify_event *) &buffer[ i ];
             if (event->len ) {
                 if (event->mask & IN_CREATE) {
                     if (event->mask & IN_ISDIR){
@@ -231,7 +256,6 @@ void filewatcher(char *dirname, int portno, char* ipaddr){
                         outgoing->fctype = CREATE;
                         outgoing->ftype = DIRECTORY;
                         strcpy(outgoing->filename, event->name);
-
                         std::cout<<"[FILEWATCHER]-- Sending request to create directory "<<outgoing->filename<<std::endl;
                         int sent = send(sock, outgoing, sizeof(message), 0 );
                         std::cout<<"[FILEWATCHER]-- Request sent, bytes = "<<sent<<" of "<<sizeof(message)<<std::endl;
@@ -239,7 +263,37 @@ void filewatcher(char *dirname, int portno, char* ipaddr){
                     }
                     else{
                         std::cout<<"[FILEWATCHER]\tCreated\tFILE\t"<<event->name<<std::endl;
-
+                        outgoing->mtype = TRY_SEND;
+                        outgoing->fctype = CREATE;
+                        outgoing->ftype = FILE_;
+                        strcpy(outgoing->filename, event->name);
+                        strcpy(workCMD, dirname);
+                        strcat(workCMD, "/");
+                        strcat(workCMD, event->name);
+                        std::cout<<"[FILEWATCHER] workCMD: "<<workCMD<<std::endl;
+                        std::ifstream filestream(workCMD, std::ios::binary);
+                        while(!filestream){
+                            std::cout<<"[FILEWATCHER]-- Could not open file, retrying"<<std::endl;
+                            usleep(100000);
+                            filestream.open(workCMD, std::ios::binary);
+                        }
+                        filestream.seekg(0, filestream.end);
+                        outgoing->filesize = filestream.tellg();
+                        outgoing->filesize = outgoing->filesize > 0 ? outgoing->filesize : 0;
+                        filestream.seekg(0, filestream.beg);
+                        std::cout<<"[FILEWATCHER]-- Sending request to create file "<<outgoing->filename<<std::endl;
+                        int sent = send(sock, outgoing, sizeof(message), 0 );
+                        std::cout<<"[FILEWATCHER]-- Request sent, bytes = "<<sent<<" of "<<sizeof(message)<<std::endl;
+                        std::cout<<"[FILEWATCHER] Loading file in memory"<<std::endl;
+                        char *filedata = (char *)malloc(sizeof(char)*outgoing->filesize);
+                        filestream.read(filedata, outgoing->filesize);
+                        std::cout<<"[FILEWATCHER] Loading file in memory... DONE"<<std::endl;
+                        std::cout<<"[FILEWATCHER] Sending data to droid"<<std::endl;
+                        sent = 0;
+                        sent = send(sock, filedata, outgoing->filesize, 0 );
+                        std::cout<<"[FILEWATCHER] Filedata sent, bytes = "<<sent<<" of "<<outgoing->filesize<<std::endl;
+                        free(filedata);
+                        filestream.close();
                     }
                 }
 
@@ -249,6 +303,36 @@ void filewatcher(char *dirname, int portno, char* ipaddr){
                     }
                     else{
                         std::cout<<"[FILEWATCHER]\tModified\tFILE\t"<<event->name<<std::endl;
+                        outgoing->mtype = TRY_SEND;
+                        outgoing->fctype = MODIFY;
+                        outgoing->ftype = FILE_;
+                        strcpy(outgoing->filename, event->name);
+                        strcpy(workCMD, dirname);
+                        strcat(workCMD, "/");
+                        strcat(workCMD, event->name);
+                        std::ifstream filestream(workCMD, std::ios::binary);
+                        while(!filestream){
+                            std::cout<<"[FILEWATCHER]-- Could not open file, retrying"<<std::endl;
+                            usleep(100000);
+                            filestream.open(workCMD, std::ios::binary);
+                        }
+                        filestream.seekg(0, filestream.end);
+                        outgoing->filesize = filestream.tellg();
+                        outgoing->filesize = outgoing->filesize > 0 ? outgoing->filesize : 0;
+                        filestream.seekg(0, filestream.beg);
+                        std::cout<<"[FILEWATCHER]-- Sending request to create file "<<outgoing->filename<<std::endl;
+                        int sent = send(sock, outgoing, sizeof(message), 0 );
+                        std::cout<<"[FILEWATCHER]-- Request sent, bytes = "<<sent<<" of "<<sizeof(message)<<std::endl;
+                        std::cout<<"[FILEWATCHER] Loading file in memory"<<std::endl;
+                        char *filedata = (char *)malloc(sizeof(char)*outgoing->filesize);
+                        filestream.read(filedata, outgoing->filesize);
+                        std::cout<<"[FILEWATCHER] Loading file in memory... DONE"<<std::endl;
+                        std::cout<<"[FILEWATCHER] Sending data to droid"<<std::endl;
+                        sent = 0;
+                        sent = send(sock, filedata, outgoing->filesize, 0 );
+                        std::cout<<"[FILEWATCHER] Filedata sent, bytes = "<<sent<<" of "<<outgoing->filesize<<std::endl;
+                        free(filedata);
+                        filestream.close();
                     }
                 }
 
