@@ -6,6 +6,7 @@ The build process of the system is simple, however does require you to have
 - Linux (program developed on Manjaro 17.1)
 - GNU make 4.2.1
 - G++/GCC 7.3.0
+- inotify-tools
 
 To build the system, clone the repository to you local disk using
 ```
