@@ -25,14 +25,15 @@ enum FileType_t{
     _FILE,
     DIRECTORY
 };
-
 struct message{
     char                    FileName[MAXFILENAMELEN];
     enum FileChangeType_t   FCType;
     enum FileType_t         FType;
     unsigned long           FileSize;
 };
-
+struct ConnectionInfo_t{
+    
+};
 class TransactionHistory_t{
     bool    ValidTransactionHistory[MAXTRANSACTIONS];
     message TransactionHistory[MAXTRANSACTIONS];
@@ -50,6 +51,7 @@ public:
     bool is_recorded(message m){
         mtx.lock();
         bool FoundRecord = false;
+        // Pass 1: Hard
         for(int i=0; i<MAXTRANSACTIONS; i++){
             if(!ValidTransactionHistory[i])
                 continue;
@@ -60,6 +62,18 @@ public:
                     FoundRecord = true;
                     ValidTransactionHistory[i] = false;
                     break;
+            }
+        }
+        // Pass 2: Soft
+        if(!FoundRecord){
+            for(int i=0; i<MAXTRANSACTIONS; i++){
+                if(!ValidTransactionHistory[i])
+                    continue;
+                if( strcmp(m.FileName, TransactionHistory[i].FileName) == 0 &&
+                    m.FType == TransactionHistory[i].FType ){
+                    FoundRecord = true;
+                    break;
+                }
             }
         }
         mtx.unlock();
@@ -94,6 +108,8 @@ TransactionHistory_t    Transactions;
 std::mutex              FileAccess;
 /* Function declarations */
 
+void set_reader_connection(int portno, char* ipaddr);
+void set_filewatcher_connection(int portno, char* ipaddr);
 void reader(int portno, char *dirname);
 void filewatcher(char *dirname, int portno, char* ipaddr);
 message* FormMessage(char *filename, FileChangeType_t fctype, FileType_t ftype, unsigned long filesize);
@@ -186,7 +202,6 @@ void reader(int portno, char *dirname) {
 
         switch(incoming->FCType){
             case CREATE:
-            case MODIFY:
                 if(incoming->FType == DIRECTORY){
                     if(!Transactions.record_message(*incoming)){
                         std::cout<<"[RECV] Cannot add transaction"<<std::endl;
@@ -239,7 +254,45 @@ void reader(int portno, char *dirname) {
 
                 }
                 break;
+            case MODIFY:
+                if(incoming->FType == _FILE){
+                    if(!Transactions.record_message(*incoming)){
+                        std::cout<<"[RECV] Cannot add transaction"<<std::endl;
+                        exit(-1);
+                    }
 
+                    std::cout<<"[RECV] Modifying FIL ["<<incoming->FileName<<"]"<<incoming->FileSize<<" "<<std::endl;
+
+                    FileAccess.lock();
+
+                    strcpy(workCMD, dirname);
+                    strcat(workCMD, "/");
+                    strcat(workCMD, incoming->FileName);
+
+                    std::ofstream filedump(workCMD, std::ios::binary|std::ios::trunc);
+
+                    char *filedata = (char *)malloc(incoming->FileSize);
+                    std::cout<<"[RECV] Begin reading data of file from other droid"<<std::endl;
+                    read(new_socket, filedata, incoming->FileSize);
+                    std::cout<<"[RECV] Done reading data of file from other droid"<<std::endl;
+                    std::cout<<"[RECV] Begin writing data to file "<<incoming->FileName<<std::endl;
+                    if(!filedump){
+                        std::cout<<"[RECV] Error opening file "<<incoming->FileName<<std::endl;
+                        exit(1);
+                    }
+                    filedump.write(filedata, incoming->FileSize);
+                    std::cout<<"[RECV] Done writing data to file "<<incoming->FileName<<std::endl;
+                    free(filedata);
+                    filedump.close();
+                    incoming->FileSize = 0;
+                    if(!Transactions.record_message(*incoming)){
+                        std::cout<<"[RECV] Cannot add transaction"<<std::endl;
+                        exit(-1);
+                    }
+                    FileAccess.unlock();
+
+                }
+                break;
             case DELETE:
                 if(incoming->FType == DIRECTORY){
                     if(!Transactions.record_message(*incoming)){
@@ -371,20 +424,7 @@ void filewatcher(char *dirname, int portno, char* ipaddr) {
                     else {
                         std::cout << "[FW: inotify]\tCreated\tFIL\t" << event->name << std::endl;
 
-                        FileAccess.lock();
-                        strcpy(workCMD, dirname);
-                        strcat(workCMD, "/");
-                        strcat(workCMD, event->name);
-                        std::ifstream filestream(workCMD, std::ios::binary);
-                        while(!filestream){
-                            std::cout<<"[FILEWATCHER]-- Could not open file, retrying"<<std::endl;
-                            usleep(100);
-                            filestream.open(workCMD, std::ios::binary);
-                        }
-                        filestream.seekg(0, filestream.end);
-                        message *message_packet = FormMessage(event->name, CREATE, _FILE, filestream.tellg());
-                        filestream.close();
-                        FileAccess.unlock();
+                        message *message_packet = FormMessage(event->name, CREATE, _FILE, 0);
 
                         if (!Transactions.is_recorded(*message_packet)) {
                             int sent = send(sock, message_packet, sizeof(message), 0);
@@ -398,7 +438,40 @@ void filewatcher(char *dirname, int portno, char* ipaddr) {
                         free(message_packet);
                     }
                 }
+                else if (event->mask & IN_MODIFY) {
+                    if(!(event->mask & IN_ISDIR)){
+                        std::cout << "[FW: inotify]\tModified\tFIL\t" << event->name << std::endl;
 
+                        FileAccess.lock();
+                        strcpy(workCMD, dirname);
+                        strcat(workCMD, "/");
+                        strcat(workCMD, event->name);
+                        std::ifstream file(workCMD, std::ios::binary);
+                        file.seekg(0, file.end);
+                        unsigned int filesize = file.tellg();
+                        file.close();
+                        FileAccess.unlock();
+                        message *message_packet = FormMessage(event->name, MODIFY, _FILE, filesize);
+
+                        if(!Transactions.is_recorded(*message_packet)){
+                            int sent = send(sock, message_packet, sizeof(message), 0);
+                            std::cout << "[FW: inotify]\tSent request to modify [" << event->name << "] file"
+                                      << std::endl;
+                            FileAccess.lock();
+                            file.open(workCMD, std::ios::binary);
+                            file.seekg(0, file.beg);
+                            char *filedata = (char*)malloc(filesize);
+                            file.read(filedata, filesize);
+                            FileAccess.unlock();
+                            send(sock, filedata, filesize, 0);
+                            free(filedata);
+
+                        }else{
+                            std::cout << "[FW: inotify]\tFile [" << event->name
+                                      << "]  modified due to incoming request, skip request send" << std::endl;
+                        }
+                    }
+                }
                 else if (event->mask & IN_DELETE) {
                     if (event->mask & IN_ISDIR) {
                         std::cout << "[FW: inotify]\tDeleted\tDIR\t" << event->name << std::endl;
