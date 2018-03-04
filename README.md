@@ -1,5 +1,5 @@
 # Directory Sync
-A simple program that keeps two folders over a network to be kept in sync.
+A simple program that keeps two folders over a network in sync.
 
 ## Setting up and running
 The build process of the system is simple, however does require you to have 
@@ -9,7 +9,7 @@ The build process of the system is simple, however does require you to have
 
 To build the system, clone the repository to you local disk using
 ```
-git clone https://github.com/supragya/DirectorySync
+git clone https://github.com/supragya/DirectorySync.git
 ```
 After this, the following set of commands will build the system:
 ```
