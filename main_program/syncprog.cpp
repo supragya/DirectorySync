@@ -26,6 +26,7 @@ enum FileType_t{
     DIRECTORY
 };
 struct message{
+    int                     valid;
     char                    FileName[MAXFILENAMELEN];
     enum FileChangeType_t   FCType;
     enum FileType_t         FType;
@@ -98,18 +99,37 @@ public:
         mtx.unlock();
         return RecordingSuccess;
     }
+    bool already_processed(message m){
+        mtx.lock();
+        bool FoundRecord = false;
+        // Pass 1: Hard
+        for(int i=0; i<MAXTRANSACTIONS; i++){
+            if(!ValidTransactionHistory[i])
+                continue;
+            if( strcmp(m.FileName, TransactionHistory[i].FileName) == 0 &&
+                m.FType == TransactionHistory[i].FType &&
+                m.FileSize == TransactionHistory[i].FileSize &&
+                m.FCType == TransactionHistory[i].FCType){
+                FoundRecord = true;
+                break;
+            }
+        }
+        mtx.unlock();
+    }
 };
 
 /* Globals */
 TransactionHistory_t    Transactions;
 std::mutex              FileAccess;
 int                     FCsock, RCsock;
+
 /* Function declarations */
 
 void set_reader_connection(int portno, char* ipaddr);
 void set_filewatcher_connection(int portno, char* ipaddr);
 void reader(char *dirname, int new_socket);
 void filewatcher(char *dirname, char* intermediate, int sock);
+void closeallsystems();
 message* FormMessage(char *filename, FileChangeType_t fctype, FileType_t ftype, unsigned long filesize);
 
 
@@ -129,6 +149,13 @@ int main( int argc, char **argv)
         std::cout<<"[MAIN] Usage: <programexec> <FolderName> <droid_IP> <SendPORT> <RecvPORT>"<<std::endl;
         exit(-1);
     }
+    std::cout<<"    __________________________________________"<<std::endl;
+    std::cout<<"  /_________________________________________ |"<<std::endl;
+    std::cout<<" /----------------------------------------+ ||"<<std::endl;
+    std::cout<<"|                                         | ||"<<std::endl;
+    std::cout<<"|              DIRECTORY SYNC             | |+"<<std::endl;
+    std::cout<<"|                                         |-+"<<std::endl;
+    std::cout<<"+-----------------------------------------+"<<std::endl;
 
     std::cout<<"[MAIN] Setting up connections "<<std::endl;
     std::thread RConnect(set_reader_connection, atoi(argv[4]), argv[2]);
@@ -139,8 +166,10 @@ int main( int argc, char **argv)
     char empty[] = "";
     std::thread listener(reader, argv[1], RCsock);
     std::thread watcher(filewatcher, argv[1], empty, FCsock);
+    std::thread closer(closeallsystems);
     listener.join();
     watcher.join();
+    closer.join();
     return 0;
 }
 
@@ -242,7 +271,35 @@ void reader(char *dirname, int new_socket) {
     char workCMD[WORKCMDLEN];
     while(1){
         valread = recv(new_socket ,(void*)incoming, sizeof(message), 0);
+        if(incoming->valid == 0 || Transactions.already_processed(*incoming)){
+            std::cout<<"[RECV] Recieved invalid/duplicate data packet. Probably the connection was closed. Quitting."<<std::endl;
 
+            std::cout<<        "                                 +---------------------+\n";
+            std::cout<<        "                                 | I am in sync. Yes   |\n";
+            std::cout<<        "                                 +------------------+--+\n";
+            std::cout<<        "                                                    |\n";
+            std::cout<<        "                                                    |\n";
+            std::cout<<        "  _                                                 |\n";
+            std::cout<<        "  \\\\                                                |\n";
+            std::cout<<        "   \\\\_          _.-._                               |\n";
+            std::cout<<        "    X:\\        (_/ \\_)     <------------------------+\n";
+            std::cout<<        "    \\::\\       ( ==  )\n";
+            std::cout<<        "     \\::\\       \\== /\n";
+            std::cout<<        "    /X:::\\   .-./`-'\\.--.\n";
+            std::cout<<        "    \\\\/\\::\\ / /     (    l\n";
+            std::cout<<        "     ~\\ \\::\\ /      `.   L.\n";
+            std::cout<<        "       \\/:::|         `.'  `\n";
+            std::cout<<        "       /:/\\:|          (    `.\n";
+            std::cout<<        "       \\/`-'`.          >    )\n";
+            std::cout<<        "              \\       //  .-'\n";
+            std::cout<<        "               |     /(  .'\n";
+            std::cout<<        "               `-..-'_ \\  \\\n";
+            std::cout<<        "               __||/_ \\ `-'\n";
+            std::cout<<        "              / _ \\ #  |\n";
+            std::cout<<        "             |  #  |#  |   B-SD3 Security Droid\n";
+            std::cout<<        "          LS |  #  |#  |      - Front View -\n";
+            exit(0);
+        }
         switch(incoming->FCType){
             case CREATE:
                 if(incoming->FType == DIRECTORY){
@@ -250,7 +307,7 @@ void reader(char *dirname, int new_socket) {
                         std::cout<<"[RECV] Cannot add transaction"<<std::endl;
                         exit(-1);
                     }
-                    std::cout<<"[RECV] Creating DIR ["<<incoming->FileName<<"]"<<std::endl;
+                    std::cout<<"[RECV]\tCreated\tDIR\t["<<incoming->FileName<<"]"<<std::endl;
 
                     strcpy(workCMD, "mkdir -p ");
                     strcat(workCMD, dirname);
@@ -258,6 +315,15 @@ void reader(char *dirname, int new_socket) {
                     strcat(workCMD, incoming->FileName);
 
                     system(workCMD);
+
+                    char *newintermediate = (char *)malloc(sizeof(char)*MAXFILENAMELEN);
+
+                    strcpy(newintermediate, incoming->FileName);
+                    std::thread currentrecv(reader, dirname, new_socket);
+                    std::thread newfilewatcher(filewatcher, dirname, newintermediate, FCsock);
+                    currentrecv.join();
+                    newfilewatcher.join();
+
                 }
                 else if(incoming->FType == _FILE){
                     if(!Transactions.record_message(*incoming)){
@@ -265,7 +331,7 @@ void reader(char *dirname, int new_socket) {
                         exit(-1);
                     }
 
-                    std::cout<<"[RECV] Creating FIL ["<<incoming->FileName<<"]"<<std::endl;
+                    std::cout<<"[RECV]\tCreated\tFIL\t["<<incoming->FileName<<"]"<<std::endl;
 
                     FileAccess.lock();
                     strcpy(workCMD, "touch ");
@@ -274,29 +340,11 @@ void reader(char *dirname, int new_socket) {
                     strcat(workCMD, incoming->FileName);
 
                     system(workCMD);
-                    if(incoming->FCType == MODIFY){
-                        strcat(workCMD, dirname);
-                        strcat(workCMD, "/");
-                        strcat(workCMD, incoming->FileName);
-                        std::ofstream filedump(workCMD, std::ios::binary);
-                        char *filedata = (char *)malloc(sizeof(char)*incoming->FileSize);
-                        std::cout<<"[RECV] Begin reading data of file from other droid"<<std::endl;
-                        read(new_socket, filedata, sizeof(filedata));
-                        std::cout<<"[RECV] Done reading data of file from other droid"<<std::endl;
-                        std::cout<<"[RECV] Begin writing data to file "<<incoming->FileName<<std::endl;
-                        if(!filedump){
-                            std::cout<<"[RECV] Error opening file "<<incoming->FileName<<std::endl;
-                            exit(1);
-                        }
-                        filedump<<filedata;
-                        std::cout<<"[RECV] Done writing data to file "<<incoming->FileName<<std::endl;
-                        free(filedata);
-                        filedump.close();
-                    }
                     FileAccess.unlock();
 
                 }
                 break;
+
             case MODIFY:
                 if(incoming->FType == _FILE){
                     if(!Transactions.record_message(*incoming)){
@@ -304,7 +352,7 @@ void reader(char *dirname, int new_socket) {
                         exit(-1);
                     }
 
-                    std::cout<<"[RECV] Modifying FIL ["<<incoming->FileName<<"]"<<incoming->FileSize<<" "<<std::endl;
+                    std::cout<<"[RECV]\tModified\tFIL\t["<<incoming->FileName<<"] size = "<<incoming->FileSize<<" "<<std::endl;
 
                     FileAccess.lock();
 
@@ -312,19 +360,15 @@ void reader(char *dirname, int new_socket) {
                     strcat(workCMD, "/");
                     strcat(workCMD, incoming->FileName);
 
-                    std::ofstream filedump(workCMD, std::ios::binary|std::ios::trunc);
+                    std::ofstream filedump(workCMD, std::ios::binary);
 
                     char *filedata = (char *)malloc(incoming->FileSize);
-                    std::cout<<"[RECV] Begin reading data of file from other droid"<<std::endl;
                     read(new_socket, filedata, incoming->FileSize);
-                    std::cout<<"[RECV] Done reading data of file from other droid"<<std::endl;
-                    std::cout<<"[RECV] Begin writing data to file "<<incoming->FileName<<std::endl;
                     if(!filedump){
                         std::cout<<"[RECV] Error opening file "<<incoming->FileName<<std::endl;
                         exit(1);
                     }
-                    filedump.write(filedata, incoming->FileSize);
-                    std::cout<<"[RECV] Done writing data to file "<<incoming->FileName<<std::endl;
+                    filedump<<filedata;
                     free(filedata);
                     filedump.close();
                     incoming->FileSize = 0;
@@ -336,15 +380,17 @@ void reader(char *dirname, int new_socket) {
 
                 }
                 break;
+
+
             case DELETE:
                 if(incoming->FType == DIRECTORY){
                     if(!Transactions.record_message(*incoming)){
                         std::cout<<"[RECV] Cannot add transaction"<<std::endl;
                         exit(-1);
                     }
-                    std::cout<<"[RECV] Deleting DIR ["<<incoming->FileName<<"]"<<std::endl;
+                    std::cout<<"[RECV]\tDeleted\tDIR\t["<<incoming->FileName<<"]"<<std::endl;
 
-                    strcpy(workCMD, "rmdir ");
+                    strcpy(workCMD, "rm -r ");
                     strcat(workCMD, dirname);
                     strcat(workCMD, "/");
                     strcat(workCMD, incoming->FileName);
@@ -357,7 +403,7 @@ void reader(char *dirname, int new_socket) {
                         exit(-1);
                     }
 
-                    std::cout<<"[RECV] Deleting FIL ["<<incoming->FileName<<"]"<<std::endl;
+                    std::cout<<"[RECV]\tDeleted\tFIL\t["<<incoming->FileName<<"]"<<std::endl;
 
                     strcpy(workCMD, "rm ");
                     strcat(workCMD, dirname);
@@ -416,11 +462,11 @@ void filewatcher(char *dirname, char *intermediate, int sock) {
             if (event->len) {
                 if (event->mask & IN_CREATE) {
                     if (event->mask & IN_ISDIR) {
-                        std::cout << "[FW: inotify]\tCreated\tDIR\t" << event->name << std::endl;
                         strcpy(workCMD, intermediate);
                         if(strlen(intermediate) > 0)
                             strcat(workCMD, "/");
                         strcat(workCMD, event->name);
+                        std::cout << "[FW: inotify]\tCreated\tDIR\t" << workCMD << std::endl;
                         message *message_packet = FormMessage(workCMD, CREATE, DIRECTORY, 0);
                         if (!Transactions.is_recorded(*message_packet)) {
                             int sent = send(sock, message_packet, sizeof(message), 0);
@@ -442,16 +488,16 @@ void filewatcher(char *dirname, char *intermediate, int sock) {
                         free(message_packet);
                     }
                     else {
-                        std::cout << "[FW: inotify]\tCreated\tFIL\t" << event->name << std::endl;
                         strcpy(workCMD, intermediate);
                         if(strlen(intermediate) > 0)
                             strcat(workCMD, "/");
                         strcat(workCMD, event->name);
+                        std::cout << "[FW: inotify]\tCreated\tFIL\t" << workCMD << std::endl;
                         message *message_packet = FormMessage(workCMD, CREATE, _FILE, 0);
 
                         if (!Transactions.is_recorded(*message_packet)) {
                             int sent = send(sock, message_packet, sizeof(message), 0);
-                            std::cout << "[FW: inotify]\tSent request to create [" << event->name << "] file"
+                            std::cout << "[FW: inotify]\tSent request to create [" << workCMD << "] file"
                                       << std::endl;
                         } else {
                             std::cout << "[FW: inotify]\tFile [" << event->name
@@ -463,17 +509,18 @@ void filewatcher(char *dirname, char *intermediate, int sock) {
                 }
                 else if (event->mask & IN_MODIFY) {
                     if(!(event->mask & IN_ISDIR)){
-                        std::cout << "[FW: inotify]\tModified\tFIL\t" << event->name << std::endl;
+
 
                         FileAccess.lock();
                         strcpy(workCMD, dirname);
+                        strcat(workCMD, "/");
+                        strcat(workCMD, intermediate);
                         if(strlen(intermediate) > 0)
                             strcat(workCMD, "/");
-                        strcat(workCMD, intermediate);
-                        strcat(workCMD, "/");
                         strcat(workCMD, event->name);
                         std::ifstream file(workCMD, std::ios::binary);
                         file.seekg(0, file.end);
+                        std::cout << "[FW: inotify]\tModified\tFIL\t" << workCMD << std::endl;
                         unsigned int filesize = file.tellg();
                         file.close();
                         FileAccess.unlock();
@@ -485,9 +532,16 @@ void filewatcher(char *dirname, char *intermediate, int sock) {
 
                         if(!Transactions.is_recorded(*message_packet)){
                             int sent = send(sock, message_packet, sizeof(message), 0);
-                            std::cout << "[FW: inotify]\tSent request to modify [" << workCMD << "] file "<< filesize
-                                      << std::endl;
+
                             FileAccess.lock();
+                            strcpy(workCMD, dirname);
+                            strcat(workCMD, "/");
+                            strcat(workCMD, intermediate);
+                            if(strlen(intermediate) > 0)
+                                strcat(workCMD, "/");
+                            strcat(workCMD, event->name);
+                            std::cout << "[FW: inotify]\tSent request to modify [" << workCMD << "] filesize = "<< filesize
+                                      << std::endl;
                             file.open(workCMD, std::ios::binary);
                             file.seekg(0, file.beg);
                             char *filedata = (char*)malloc(filesize);
@@ -547,7 +601,48 @@ void filewatcher(char *dirname, char *intermediate, int sock) {
     }
 
 }
-
+void closeallsystems(){
+    std::cout<<"NOTICE: You can shutdown the system by typing <shut>"<<std::endl;
+    char input[10];
+    while(1) {
+        std::cin >> input;
+        if(strcmp(input, "shut") == 0){
+            std::cout<<"****Shutting down DirectorySync*****"<<std::endl;
+            message* closerequest = (message*)malloc(sizeof(message));
+            closerequest->valid = 0;
+            int sent = send(FCsock, closerequest, sizeof(message), 0);
+            free(closerequest);
+            std::cout<<        "                                 +---------------------+\n";
+            std::cout<<        "                                 | I am in sync. Yes   |\n";
+            std::cout<<        "                                 +------------------+--+\n";
+            std::cout<<        "                                                    |\n";
+            std::cout<<        "                                                    |\n";
+            std::cout<<        "  _                                                 |\n";
+            std::cout<<        "  \\\\                                                |\n";
+            std::cout<<        "   \\\\_          _.-._                               |\n";
+            std::cout<<        "    X:\\        (_/ \\_)     <------------------------+\n";
+            std::cout<<        "    \\::\\       ( ==  )\n";
+            std::cout<<        "     \\::\\       \\== /\n";
+            std::cout<<        "    /X:::\\   .-./`-'\\.--.\n";
+            std::cout<<        "    \\\\/\\::\\ / /     (    l\n";
+            std::cout<<        "     ~\\ \\::\\ /      `.   L.\n";
+            std::cout<<        "       \\/:::|         `.'  `\n";
+            std::cout<<        "       /:/\\:|          (    `.\n";
+            std::cout<<        "       \\/`-'`.          >    )\n";
+            std::cout<<        "              \\       //  .-'\n";
+            std::cout<<        "               |     /(  .'\n";
+            std::cout<<        "               `-..-'_ \\  \\\n";
+            std::cout<<        "               __||/_ \\ `-'\n";
+            std::cout<<        "              / _ \\ #  |\n";
+            std::cout<<        "             |  #  |#  |   B-SD3 Security Droid\n";
+            std::cout<<        "          LS |  #  |#  |      - Front View -\n";
+            exit(0);
+        }
+        else{
+            std::cout<<"(To close, type \"shut\")"<<std::endl;
+        }
+    }
+}
 
 message* FormMessage(char *filename, FileChangeType_t fctype, FileType_t ftype, unsigned long filesize){
     message* newmsg = (message *)malloc(sizeof(message));
@@ -555,5 +650,6 @@ message* FormMessage(char *filename, FileChangeType_t fctype, FileType_t ftype, 
     newmsg->FType = ftype;
     newmsg->FCType = fctype;
     newmsg->FileSize = filesize;
+    newmsg->valid = 1;
     return newmsg;
 }
